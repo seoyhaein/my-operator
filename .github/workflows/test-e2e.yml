@@ -2,31 +2,83 @@ name: E2E Tests
 
 on:
   push:
+    branches: [ "main" ]
   pull_request:
+    branches: [ "main" ]
 
 jobs:
   test-e2e:
-    name: Run on Ubuntu
+    name: Run SLO & E2E Validation
     runs-on: ubuntu-latest
     steps:
+      # 1. 코드 체크아웃
       - name: Clone the code
         uses: actions/checkout@v4
 
+      # 2. Go 설치
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.22'
 
-      - name: Install the latest version of kind
+      # 3. Kind 클러스터 설치 (액션 사용이 더 안정적입니다)
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ci-cluster
+
+      # 4. 이미지 빌드 (우리가 성공했던 방식)
+      - name: Build Operator Image
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          make docker-build IMG=my-operator:ci
 
-      - name: Verify kind installation
-        run: kind version
-
-      - name: Running Test e2e
+      # 5. 이미지 로드
+      - name: Load Image into Kind
         run: |
-          go mod tidy
-          make test-e2e
+          kind load docker-image my-operator:ci --name ci-cluster
+
+      # 6. 배포
+      - name: Deploy Operator
+        run: |
+          make deploy IMG=my-operator:ci
+
+      # 7. 대기 (컨트롤러 준비)
+      - name: Wait for Controller Ready
+        run: |
+          echo "Waiting for controller pod..."
+          kubectl wait --for=condition=Ready pod -l control-plane=controller-manager -n my-operator-system --timeout=300s
+          kubectl get pods -n my-operator-system
+
+      # 8. 권한 부여 (SLO 검증용)
+      - name: Grant RBAC Permissions
+        run: |
+          kubectl create clusterrolebinding default-admin --clusterrole=cluster-admin --serviceaccount=default:default
+
+      # 9. 포트 포워딩
+      - name: Port Forward Metrics
+        run: |
+          kubectl port-forward -n my-operator-system deployment/my-operator-controller-manager 8443:8443 &
+          sleep 5
+
+      # 10. 샘플 CR 생성 (트래픽 발생)
+      - name: Create Sample CR
+        run: |
+          kubectl apply -f - <<EOF
+          apiVersion: batch.my.domain/v1
+          kind: JobOperator
+          metadata:
+            name: ci-test-job
+            namespace: default
+          spec:
+            replicas: 1
+            image: nginx:latest
+            port: 80
+          EOF
+          sleep 10
+          kubectl get pods
+
+      # 11. SLO 검증 (Curl)
+      - name: Verify SLO Metrics
+        run: |
+          chmod +x scripts/check-slo-metrics.sh
+          ./scripts/check-slo-metrics.sh
