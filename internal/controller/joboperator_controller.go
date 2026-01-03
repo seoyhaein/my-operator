@@ -111,7 +111,7 @@ func (r *JobOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		ReconcileTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
 		// [Metrics] 실패 시에도 소요 시간 기록
 		ReconcileDurationSeconds.WithLabelValues(req.Name, req.Namespace, "error").Observe(time.Since(startTime).Seconds())
-		
+
 		return ctrl.Result{}, err
 	}
 
