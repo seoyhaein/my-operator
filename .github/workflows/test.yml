@@ -2,7 +2,15 @@ name: Tests
 
 on:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
 
 jobs:
   test:
@@ -20,4 +28,5 @@ jobs:
       - name: Running Tests
         run: |
           go mod tidy
+          git diff --exit-code
           make test

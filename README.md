@@ -12,6 +12,29 @@
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
+#### Development tools (project-local)
+
+This project uses a project-local toolchain to ensure consistency
+between local development and CI.
+
+- **golangci-lint v2.1.0**
+    - Provided in `./bin/golangci-lint`
+    - Used by GitHub Actions and recommended for local linting
+
+### Linting
+
+This project uses `golangci-lint` with a v2 configuration
+(`.golangci.yml` uses `version: "2"`).
+
+To run lint locally (recommended):
+
+```sh
+make lint
+```
+
+**NOTE:** The same version and configuration are used in CI,
+ensuring consistent results between local development and GitHub Actions.
+
 ### To Deploy on the cluster
 **Build and push your image to the location specified by `IMG`:**
 
