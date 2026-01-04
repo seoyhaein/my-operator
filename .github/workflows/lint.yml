@@ -2,7 +2,15 @@ name: Lint
 
 on:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE*"
+      - ".github/**/*.md"
 
 jobs:
   lint:
