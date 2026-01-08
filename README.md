@@ -35,6 +35,30 @@ make lint
 **NOTE:** The same version and configuration are used in CI,
 ensuring consistent results between local development and GitHub Actions.
 
+### Local Development (Quick Start)
+For rapid iteration, we provide a Developer Entrypoint Script. This script performs safety checks (cluster existence, context validation), installs CRDs, and guides you through the running loop.
+
+1. Setup your local environment:
+
+```bash
+# Checks prerequisites, installs CRDs, and waits for them to be established
+./hack/dev-start.sh
+# or
+# ./hack/dev-start-kubectl.sh
+```
+2. Run the controller locally: Follow the instructions printed by the script above. Usually, it involves:
+
+```bash
+make run
+```
+3. Test your changes: Open a new terminal and apply sample CRs:
+
+```bash
+kubectl apply -k config/samples/
+
+```
+- Check metrics and logs as guided by the dev-start.sh/dev-start-kubectl.sh output.
+
 ### To Deploy on the cluster
 **Build and push your image to the location specified by `IMG`:**
 
