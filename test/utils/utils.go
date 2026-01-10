@@ -40,7 +40,9 @@ func warnError(err error) {
 	_, _ = fmt.Fprintf(GinkgoWriter, "warning: %v\n", err)
 }
 
-// Run executes the provided command within this context
+// Run executes the provided command within this context.
+// - On success: returns STDOUT only (important for jsonpath/go-template parsing)
+// - On failure: returns STDOUT (partial) and an error containing STDERR/STDOUT
 func Run(cmd *exec.Cmd) (string, error) {
 	dir, _ := GetProjectDir()
 	cmd.Dir = dir
@@ -52,12 +54,30 @@ func Run(cmd *exec.Cmd) (string, error) {
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	command := strings.Join(cmd.Args, " ")
 	_, _ = fmt.Fprintf(GinkgoWriter, "running: %q\n", command)
-	output, err := cmd.CombinedOutput()
+
+	//output, err := cmd.CombinedOutput()
+	//if err != nil {
+	//	return string(output), fmt.Errorf("%q failed with error %q: %w", command, string(output), err)
+	//}
+	//
+	//return string(output), nil
+
+	// utils.Run()을 stdout만 반환하도록 바꿈. 이전코드는 stderr 와 stdout이 섞여서 문제가 있었음.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	outStr := stdout.String()
+	errStr := stderr.String()
+
 	if err != nil {
-		return string(output), fmt.Errorf("%q failed with error %q: %w", command, string(output), err)
+		// 에러일 때는 디버깅에 도움이 되도록 stderr + stdout 모두 보여주기
+		combined := strings.TrimSpace(errStr + "\n" + outStr)
+		return outStr, fmt.Errorf("%q failed: %s: %w", command, combined, err)
 	}
 
-	return string(output), nil
+	return outStr, nil
 }
 
 // InstallPrometheusOperator installs the prometheus Operator to be used to export the enabled metrics.
