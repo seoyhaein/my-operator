@@ -55,7 +55,7 @@ const controllerManagerDeploymentName = "my-operator-controller-manager"
 // NOTE
 // - utils.Run() returns STDOUT only on success (stable for jsonpath parsing)
 // - On failure, error contains stderr+stdout for debugging
-// - TokenRequest keeps CombinedOutput() to preserve rich error messages.
+// - TokenRequest: do NOT use CombinedOutput() for JSON parsing (stderr pollution)
 // -----------------------------------------------------------------------------
 
 var _ = Describe("Manager", Ordered, func() {
@@ -333,7 +333,7 @@ var _ = Describe("Manager", Ordered, func() {
 })
 
 // -----------------------------------------------------------------------------
-// Token request helper (FIX: no /tmp file dependency)
+// Token request helper (FIX: avoid CombinedOutput for JSON parsing)
 // -----------------------------------------------------------------------------
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
@@ -355,16 +355,25 @@ func serviceAccountToken() (string, error) {
 
 		cmd.Stdin = strings.NewReader(tokenRequestRawString)
 
-		output, err := cmd.CombinedOutput()
+		// [OLD] CombinedOutput mixes stdout+stderr and can break JSON parsing
+		// output, err := cmd.CombinedOutput()
+		// if err != nil {
+		// 	lastErr = fmt.Errorf("token request failed: %s", string(output))
+		// 	g.Expect(err).NotTo(HaveOccurred())
+		// 	return
+		// }
+
+		// [NEW] utils.Run returns STDOUT only on success (safe for JSON parsing)
+		stdout, err := utils.Run(cmd)
 		if err != nil {
-			lastErr = fmt.Errorf("token request failed: %s", string(output))
+			lastErr = fmt.Errorf("token request failed: %w", err)
 			g.Expect(err).NotTo(HaveOccurred())
 			return
 		}
 
 		var token tokenRequest
-		if err := json.Unmarshal(output, &token); err != nil {
-			lastErr = fmt.Errorf("token response json parse failed: %w (body=%s)", err, string(output))
+		if err := json.Unmarshal([]byte(stdout), &token); err != nil {
+			lastErr = fmt.Errorf("token response json parse failed: %w (body=%q)", err, stdout)
 			g.Expect(err).NotTo(HaveOccurred())
 			return
 		}
