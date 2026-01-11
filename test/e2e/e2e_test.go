@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -172,19 +173,71 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should run successfully", func() {
 			By("validating that the controller-manager pod is running as expected")
 
+			// Print kubectl context/env only once (Eventually calls many times).
+			var debugKubectlOnce sync.Once
+
 			verifyControllerUp := func(g Gomega) {
+				debugKubectlOnce.Do(func() {
+					By("debug kubectl context used by e2e test")
+
+					out, err := utils.Run(exec.Command("kubectl", "version", "--client=true"))
+					_, _ = fmt.Fprintf(GinkgoWriter, "e2e kubectl client:\n%s\nerr=%v\n", strings.TrimSpace(out), err)
+
+					out, err = utils.Run(exec.Command("kubectl", "config", "current-context"))
+					_, _ = fmt.Fprintf(GinkgoWriter, "e2e kubectl current-context=%q err=%v\n", strings.TrimSpace(out), err)
+
+					_, _ = fmt.Fprintf(GinkgoWriter, "ENV KUBECONFIG=%q HOME=%q PATH=%q\n",
+						os.Getenv("KUBECONFIG"), os.Getenv("HOME"), os.Getenv("PATH"))
+
+					out, err = utils.Run(exec.Command("kubectl", "config", "view", "--minify", "--raw"))
+					_, _ = fmt.Fprintf(GinkgoWriter, "e2e kubeconfig(minify/raw):\n%s\nerr=%v\n", out, err)
+
+					out, err = utils.Run(exec.Command("kubectl", "cluster-info"))
+					_, _ = fmt.Fprintf(GinkgoWriter, "e2e cluster-info:\n%s\nerr=%v\n", strings.TrimSpace(out), err)
+				})
+
+				// -----------------------------------------------------------------
+				// controller-manager pod name discovery (minimal change, more robust)
+				//
+				// Why:
+				// - The old jsonpath filter `deletionTimestamp==null` can return empty
+				//   unexpectedly depending on kubectl/jsonpath behavior.
+				// - Using `.items[0]` can error when the list is empty.
+				//
+				// Approach:
+				// - Query ALL matching pod names as a space-separated list:
+				//     {.items[*].metadata.name}
+				// - Split it in Go, and pick the first token.
+				// - If empty, we fail the assertion -> Eventually retries.
+				// -----------------------------------------------------------------
+
+				// [OLD] flaky in some environments (kept for study)
+				// cmd := exec.Command("kubectl", "get", "pods",
+				// 	"-n", namespace,
+				// 	"-l", "control-plane=controller-manager",
+				// 	"-o", "jsonpath={.items[?(@.metadata.deletionTimestamp==null)].metadata.name}",
+				// )
+				// podName, err := utils.Run(cmd)
+				// g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod name")
+				// controllerPodName = strings.TrimSpace(podName)
+				// g.Expect(controllerPodName).NotTo(BeEmpty(), "controller-manager pod not found yet")
+
+				// [NEW] robust query
 				cmd := exec.Command("kubectl", "get", "pods",
 					"-n", namespace,
 					"-l", "control-plane=controller-manager",
-					"-o", "jsonpath={.items[?(@.metadata.deletionTimestamp==null)].metadata.name}",
+					"-o", "jsonpath={.items[*].metadata.name}",
 				)
-				podName, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod name")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod names")
 
-				controllerPodName = strings.TrimSpace(podName)
-				g.Expect(controllerPodName).NotTo(BeEmpty(), "controller-manager pod not found yet")
+				names := strings.Fields(out)
+				g.Expect(names).NotTo(BeEmpty(), "controller-manager pod not found yet")
+
+				controllerPodName = strings.TrimSpace(names[0])
 				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
 
+				// Validate phase is Running
 				cmd = exec.Command("kubectl", "get", "pod", controllerPodName,
 					"-n", namespace,
 					"-o", "jsonpath={.status.phase}",
@@ -198,26 +251,10 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		It("should ensure the metrics endpoint is serving metrics (with unified instrumentation)", func() {
-			// -----------------------------------------------------------
-			// 0) RBAC (idempotent apply) - avoids "already exists" on rerun
-			// -----------------------------------------------------------
-
-			// [OLD] non-idempotent create (fails on rerun: already exists)
-			// By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			// cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-			// 	"--clusterrole=my-operator-metrics-reader",
-			// 	fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
-			// )
-			// _, err := utils.Run(cmd)
-			// Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
-
 			By("ensuring ClusterRoleBinding exists (idempotent apply)")
 			err := applyClusterRoleBinding(metricsRoleBindingName, "my-operator-metrics-reader", namespace, serviceAccountName)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply ClusterRoleBinding")
 
-			// -----------------------------------------------------------
-			// 1) Basic infra checks
-			// -----------------------------------------------------------
 			By("validating that the metrics service is available")
 			cmd := exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
 			_, err = utils.Run(cmd)
@@ -247,9 +284,6 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyMetricsServerStarted, 5*time.Minute, 2*time.Second).Should(Succeed())
 
-			// -----------------------------------------------------------
-			// 2) Unified SLO Instrumentation (Start/End + best-effort summary)
-			// -----------------------------------------------------------
 			By("SLO: initializing unified instrumentation")
 
 			metricsFetcher := func(ctx context.Context) (string, error) {
@@ -260,7 +294,6 @@ var _ = Describe("Manager", Ordered, func() {
 					return "", err
 				}
 
-				// wait for completion (Succeeded or Failed)
 				Eventually(func(g Gomega) {
 					phase, err := curlMetricsPhase(namespace, podName)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -270,10 +303,7 @@ var _ = Describe("Manager", Ordered, func() {
 				}, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 				logs, err := curlMetricsLogs(namespace, podName)
-
-				// best-effort cleanup
 				_ = deletePodNoWait(namespace, podName)
-
 				return logs, err
 			}
 
@@ -288,16 +318,12 @@ var _ = Describe("Manager", Ordered, func() {
 
 			inst := instrument.New(labels, metricsFetcher, &testLogger{}, writer)
 
-			// Start/End using defer so End always runs.
 			inst.Start(context.Background())
 			defer func() {
 				passed := !CurrentSpecReport().Failed()
 				inst.End(context.Background(), passed)
 			}()
 
-			// -----------------------------------------------------------
-			// 3) Actual assertion: ensure we can fetch metrics at least once
-			// -----------------------------------------------------------
 			By("sanity: scraping metrics once via fetcher")
 			text, err := metricsFetcher(context.Background())
 			Expect(err).NotTo(HaveOccurred(), "metrics fetcher failed")
@@ -329,7 +355,6 @@ func serviceAccountToken() (string, error) {
 
 		cmd.Stdin = strings.NewReader(tokenRequestRawString)
 
-		// Keep CombinedOutput for maximum debug value on failure.
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			lastErr = fmt.Errorf("token request failed: %s", string(output))
@@ -398,7 +423,6 @@ subjects:
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(yaml)
 
-	// CombinedOutput here is fine; this YAML isn't parsing-sensitive and we want debug output.
 	out, err := cmd.CombinedOutput()
 	_, _ = fmt.Fprintf(GinkgoWriter, "running: %q\n", strings.Join(cmd.Args, " "))
 	if len(out) > 0 {
