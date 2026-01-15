@@ -30,9 +30,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/yeongki/my-operator/internal/artifacts"
 	"github.com/yeongki/my-operator/pkg/slo"
+	"github.com/yeongki/my-operator/pkg/slo/artifacts"
+
 	"github.com/yeongki/my-operator/test/e2e/instrument"
+	e2eenv "github.com/yeongki/my-operator/test/e2e/internal/env"
+	"github.com/yeongki/my-operator/test/e2e/internal/writers"
 	"github.com/yeongki/my-operator/test/utils"
 )
 
@@ -59,9 +62,15 @@ const controllerManagerDeploymentName = "my-operator-controller-manager"
 // -----------------------------------------------------------------------------
 
 var _ = Describe("Manager", Ordered, func() {
-	var controllerPodName string
+	var (
+		controllerPodName string
+		cfg               slo.Options
+	)
 
 	BeforeAll(func() {
+		// Load all env-driven configuration once (avoid scattered os.Getenv()).
+		cfg = e2eenv.LoadOptions()
+
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
 		_, err := utils.Run(cmd)
@@ -92,9 +101,9 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		// [NEW] debug mode: keep cluster/resources for investigation
-		if os.Getenv("E2E_SKIP_CLEANUP") == "1" {
-			By("E2E_SKIP_CLEANUP=1: skipping cleanup")
+		// Debug mode: keep cluster/resources for investigation.
+		if cfg.SkipCleanup {
+			By("E2E_SKIP_CLEANUP enabled: skipping cleanup")
 			return
 		}
 
@@ -261,7 +270,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
 
 			By("getting the service account token (TokenRequest)")
-			token, err := serviceAccountToken()
+			token, err := serviceAccountToken(cfg.TokenRequestTimeout)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(token).NotTo(BeEmpty())
 
@@ -307,16 +316,28 @@ var _ = Describe("Manager", Ordered, func() {
 				return logs, err
 			}
 
-			writer := summaryWriterFromEnv()
+			// -----------------------------------------------------------------
+			// Writer composition (no env reads here):
+			// cfg.ArtifactsDir -> artifacts.JSONFileWriter -> writers.SummaryWriterAdapter
+			// -----------------------------------------------------------------
+			var summaryWriter slo.SummaryWriter
+			if cfg.ArtifactsDir != "" {
+				jf := artifacts.JSONFileWriter{
+					Path: filepath.Join(cfg.ArtifactsDir, "sli-summary.json"),
+				}
+				summaryWriter = writers.SummaryWriterAdapter{W: jf}
+			}
 
 			labels := slo.Labels{
 				Suite:     "e2e",
 				TestCase:  "metrics-health",
 				Namespace: namespace,
-				RunID:     os.Getenv("CI_RUN_ID"),
+				RunID:     cfg.RunID,
 			}
 
-			inst := instrument.New(labels, metricsFetcher, &testLogger{}, writer)
+			inst := instrument.New(labels, metricsFetcher, &testLogger{}, summaryWriter,
+				instrument.WithEnabled(cfg.Enabled),
+			)
 
 			inst.Start(context.Background())
 			defer func() {
@@ -332,12 +353,40 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 })
 
-// -----------------------------------------------------------------------------
-// Token request helper (FIX: avoid CombinedOutput for JSON parsing)
-// -----------------------------------------------------------------------------
+// TODO(util): TokenRequest generalization for reuse across operators.
+//
+// Current behavior:
+//   - TokenRequest body omits spec.audiences / spec.expirationSeconds (cluster defaults).
+//   - Works well for this test environment, but may be environment-/receiver-dependent.
+//
+// Risks when used as a shared utility:
+//   - Default audience differs by cluster / distro; some receivers (proxy/auth middleware)
+//     may enforce audience strictly -> 401 even with a valid token.
+//   - Some apiservers may require spec/audiences (schema/validation differences) -> 4xx on token request.
+//   - Short expiration can introduce flaky failures during long debug sessions; long expiration may be preferred.
+//
+// Follow-up work:
+//   1) Expose token request options (escape hatch):
+//        - Audiences []string (nil = omit / default behavior)
+//        - ExpirationSeconds *int64 (nil = omit / default)
+//        - Optional BoundObjectRef / raw TokenRequest override for advanced setups
+//   2) Implement audience fallback strategy for robustness:
+//        - Try nil (omit) first
+//        - If metrics access returns 401/403 and/or token request fails with validation,
+//          retry with common candidates (e.g. "https://kubernetes.default.svc", "kubernetes")
+//        - Allow caller-provided preferred audiences list
+//   3) Improve diagnostics:
+//        - Include which audience candidate was used
+//        - Distinguish "token creation failed" vs "metrics fetch failed" vs "network/tls issues"
+//        - Preserve stderr in error messages (already partially done in utils.Run)
+//   4) Add tests (table-driven):
+//        - "no auth" metrics endpoint
+//        - "auth required" endpoint with strict audience checking (if available via test fixture)
+//        - long-running test to ensure expiration doesn't cause flakes
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
-func serviceAccountToken() (string, error) {
+// Token request helper (FIX: avoid CombinedOutput for JSON parsing)
+func serviceAccountToken(timeout time.Duration) (string, error) {
 	const tokenRequestRawString = `{
   "apiVersion": "authentication.k8s.io/v1",
   "kind": "TokenRequest"
@@ -382,7 +431,7 @@ func serviceAccountToken() (string, error) {
 		g.Expect(out).NotTo(BeEmpty(), "token is empty")
 	}
 
-	Eventually(verifyTokenCreation, 2*time.Minute, 2*time.Second).Should(Succeed())
+	Eventually(verifyTokenCreation, timeout, 2*time.Second).Should(Succeed())
 
 	if out == "" && lastErr != nil {
 		return "", lastErr
@@ -396,24 +445,18 @@ type tokenRequest struct {
 	} `json:"status"`
 }
 
-// -----------------------------------------------------------------------------
-// Summary writer helper
-// -----------------------------------------------------------------------------
+// summaryWriterFromEnv Summary writer helper
+//func summaryWriterFromEnv() artifacts.JSONFileWriter {
+//	dir := os.Getenv("ARTIFACTS_DIR")
+//	if dir == "" {
+//		dir = "/tmp"
+//	}
+//	return artifacts.JSONFileWriter{
+//		Path: filepath.Join(dir, "sli-summary.json"),
+//	}
+//}
 
-func summaryWriterFromEnv() artifacts.JSONFileWriter {
-	dir := os.Getenv("ARTIFACTS_DIR")
-	if dir == "" {
-		dir = "/tmp"
-	}
-	return artifacts.JSONFileWriter{
-		Path: filepath.Join(dir, "sli-summary.json"),
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Idempotent ClusterRoleBinding helper
-// -----------------------------------------------------------------------------
-
+// applyClusterRoleBinding Idempotent ClusterRoleBinding helper
 func applyClusterRoleBinding(name, clusterRole, ns, sa string) error {
 	yaml := fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

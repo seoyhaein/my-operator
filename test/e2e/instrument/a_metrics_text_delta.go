@@ -61,7 +61,7 @@ type ADeltaInstrument struct {
 //   - For new code, prefer Instrument + fetcher injection.
 func NewADelta(labels slo.Labels, logger slo.Logger, writer slo.SummaryWriter) *ADeltaInstrument {
 	i := &ADeltaInstrument{
-		enabled:    slo.Enabled(),
+		enabled:    false, // default off
 		logf:       func(string, ...any) {},
 		writer:     writer,
 		labels:     labels,

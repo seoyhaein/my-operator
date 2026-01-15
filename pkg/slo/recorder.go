@@ -62,17 +62,15 @@ func (r *Recorder) ObserveReconcileDelta(l Labels, delta int64) {
 // - Always calls ObserveConvergence (when enabled).
 // - If writer is set, emits a JSON-friendly summary for CI artifacts.
 // - Returns error only for "save" step; metric observe is best-effort.
-func (r *Recorder) RecordAndSave(l Labels, d time.Duration) error {
-	// 1) 메트릭 기록 (enabled/guardrail은 ObserveConvergence가 책임)
+func (r *Recorder) RecordAndSave(l Labels, d time.Duration) {
+	if !r.enabled {
+		return
+	}
+
 	r.ObserveConvergence(l, d)
 
-	// 2) 저장은 옵션 (writer 없으면 끝)
-	if !r.enabled || r.writer == nil {
-		return nil
-	}
-	// ObserveConvergence와 동일한 guardrail을 유지(중복이 싫으면 ObserveConvergence가 bool 반환하도록 리팩터 가능)
-	if d < 0 {
-		return nil
+	if r.writer == nil || d < 0 {
+		return
 	}
 
 	val := d.Seconds()
@@ -84,11 +82,8 @@ func (r *Recorder) RecordAndSave(l Labels, d time.Duration) error {
 	}
 
 	if err := r.writer.WriteSummary(summary); err != nil {
-		// 저장 실패는 CI에서 중요한 신호일 수 있으니 로그는 남김
-		r.logf("slo: failed to write summary: %v labels=%+v", err, l)
-		return err
+		r.logf("slo: failed to write summary (best-effort): %v labels=%+v", err, l)
 	}
-	return nil
 }
 
 func (r *Recorder) log(format string, args ...any) {

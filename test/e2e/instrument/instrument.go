@@ -78,6 +78,12 @@ func WithReconcileTotalMetricName(name string) Option {
 	}
 }
 
+func WithEnabled(v bool) Option {
+	return func(i *Instrument) {
+		i.enabled = v
+	}
+}
+
 // New creates a unified instrument.
 // It checks slo.Enabled() automatically.
 //
@@ -86,7 +92,7 @@ func WithReconcileTotalMetricName(name string) Option {
 // - Fetcher is injected from tests.
 func New(labels slo.Labels, fetcher MetricsFetcher, logger slo.Logger, writer slo.SummaryWriter, opts ...Option) *Instrument {
 	i := &Instrument{
-		enabled:                  slo.Enabled(), // Rule A: Opt-in
+		enabled:                  false, // default off
 		fetcher:                  fetcher,
 		labels:                   labels,
 		logf:                     func(string, ...any) {},
