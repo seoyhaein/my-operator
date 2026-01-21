@@ -118,12 +118,13 @@ func runCurlMetricsOnce(ns, token, metricsSvcName, serviceAccountName string) (s
 	// NOTE:
 	// - keep -k for self-signed cert in test env.
 	// - keep output clean: avoid "-v" (headers/noise). (instrument parser should handle most cases anyway)
-	curlCmd := fmt.Sprintf(
-		`set -euo pipefail;
-echo "[curl-metrics] url=%s";
-curl -ksS -H "Authorization: Bearer %s" "%s";
-`, metricsURL, token, metricsURL,
-	)
+	// 	curlCmd := fmt.Sprintf(`set -euo pipefail;
+	// echo "[curl-metrics] url=%s" >&2;
+	// curl -ksS --fail-with-body -H "Authorization: Bearer %s" "%s";
+	// `, metricsURL, token, metricsURL)
+
+	curlCmd := fmt.Sprintf(`set -euo pipefail;
+curl -ksS --fail-with-body -H "Authorization: Bearer %s" "%s";`, token, metricsURL)
 
 	cmd := exec.Command(
 		"kubectl", "run", podName,
@@ -216,4 +217,29 @@ func waitCurlMetricsDone(ns, podName string) {
 		g.Expect(phase == "Succeeded" || phase == "Failed").To(BeTrue(),
 			"curl pod not done yet, phase=%s", phase)
 	}, 5*time.Minute, 2*time.Second).Should(Succeed())
+}
+
+func waitControllerManagerReady(ns string) {
+	Eventually(func(g Gomega) {
+		out, err := utils.Run(exec.Command(
+			"kubectl", "get", "pods",
+			"-n", ns,
+			"-l", "control-plane=controller-manager",
+			"-o", "jsonpath={.items[0].status.containerStatuses[0].ready}",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(out)).To(Equal("true"))
+	}, 5*time.Minute, 5*time.Second).Should(Succeed())
+}
+
+func waitServiceHasEndpoints(ns, svc string) {
+	Eventually(func(g Gomega) {
+		out, err := utils.Run(exec.Command(
+			"kubectl", "get", "endpoints", svc,
+			"-n", ns,
+			"-o", "jsonpath={.subsets[0].addresses[0].ip}",
+		))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(out)).NotTo(BeEmpty())
+	}, 5*time.Minute, 5*time.Second).Should(Succeed())
 }

@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -10,7 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/yeongki/my-operator/test/e2e/harnessv2"
+	"github.com/yeongki/my-operator/test/e2e/harness"
 	e2eenv "github.com/yeongki/my-operator/test/e2e/internal/env"
 	"github.com/yeongki/my-operator/test/utils"
 )
@@ -26,8 +25,8 @@ var _ = Describe("Manager", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		// Load all env-driven configuration once.
 		cfg = e2eenv.LoadOptions()
+		By(fmt.Sprintf("ArtifactsDir=%q RunID=%q Enabled=%v", cfg.ArtifactsDir, cfg.RunID, cfg.Enabled))
 
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
@@ -35,13 +34,6 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
 
 		By("labeling the namespace to enforce the security policy")
-
-		// [OLD] restricted enforce (kept for reference)
-		// cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-		// 	"pod-security.kubernetes.io/enforce=restricted")
-
-		// [NEW] baseline to reduce flakiness while you are iterating.
-		// - Later, when the manager pod is fully compliant, switch back to restricted.
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
 			"pod-security.kubernetes.io/enforce=baseline")
 		_, err = utils.Run(cmd)
@@ -57,10 +49,19 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
+		By("ensuring metrics reader RBAC for controller-manager SA")
+		cmd = exec.Command("bash", "-lc", fmt.Sprintf(`
+set -euo pipefail
+kubectl create clusterrolebinding my-operator-e2e-metrics-reader \
+  --clusterrole=my-operator-metrics-reader \
+  --serviceaccount=%s:%s \
+  --dry-run=client -o yaml | kubectl apply -f -
+`, namespace, serviceAccountName))
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterAll(func() {
-		// Debug mode: keep cluster/resources for investigation.
 		if cfg.SkipCleanup {
 			By("E2E_SKIP_CLEANUP enabled: skipping cleanup")
 			return
@@ -82,35 +83,40 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
-	// v2: token 확보는 테스트 레이어(e2e)에서 수행
 	BeforeEach(func() {
+		By("requesting service account token")
 		t, err := utils.ServiceAccountToken(namespace, serviceAccountName, cfg.TokenRequestTimeout)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(t).NotTo(BeEmpty())
 		token = t
+
+		By("waiting controller-manager ready")
+		waitControllerManagerReady(namespace)
+
+		By("waiting metrics service endpoints ready")
+		waitServiceHasEndpoints(namespace, metricsServiceName)
 	})
 
-	// v2: 계측은 Attach()로 훅에 고정 (테스트 본문은 계측을 몰라도 됨)
-	harnessv2.Attach(
-		func() harnessv2.Deps {
-			allowParallel := strings.TrimSpace(os.Getenv("SLO_ALLOW_PARALLEL")) == "1"
-			return harnessv2.Deps{
+	harness.Attach(
+		func() harness.HarnessDeps {
+			return harness.HarnessDeps{
+				ArtifactsDir: cfg.ArtifactsDir,
+				Suite:        "e2e",
+				TestCase:     "",
+				RunID:        cfg.RunID,
+				Enabled:      cfg.Enabled,
+			}
+		},
+		func() harness.FetchDeps {
+			return harness.FetchDeps{
 				Namespace:          namespace,
 				Token:              token,
 				MetricsServiceName: metricsServiceName,
 				ServiceAccountName: serviceAccountName,
-
-				ArtifactsDir: cfg.ArtifactsDir,
-
-				Suite:    "e2e",
-				TestCase: "", // Attach() auto-fills leaf node text
-				RunID:    cfg.RunID,
-
-				AllowParallel: allowParallel,
-				Enabled:       cfg.Enabled,
 			}
 		},
-		harnessv2.CurlPodFns{
+		harness.DefaultV3Specs, // ✅ e2e에서 spec 패키지 import 없이
+		harness.CurlPodFns{
 			RunCurlMetricsOnce:  runCurlMetricsOnce,
 			WaitCurlMetricsDone: waitCurlMetricsDone,
 			CurlMetricsLogs:     curlMetricsLogs,
@@ -118,7 +124,6 @@ var _ = Describe("Manager", Ordered, func() {
 		},
 	)
 
-	// 이제 테스트는 "검증만" 한다
 	It("should ensure the metrics endpoint is serving metrics", func() {
 		By("scraping /metrics via curl pod")
 
@@ -130,6 +135,14 @@ var _ = Describe("Manager", Ordered, func() {
 		text, err := curlMetricsLogs(namespace, podName)
 		_ = deletePodNoWait(namespace, podName)
 		Expect(err).NotTo(HaveOccurred())
+
+		if !strings.Contains(text, "controller_runtime_reconcile_total") {
+			head := text
+			if len(head) > 800 {
+				head = head[:800]
+			}
+			GinkgoWriter.Printf("metrics text head:\n%s\n", head)
+		}
 
 		Expect(text).To(ContainSubstring("controller_runtime_reconcile_total"))
 

@@ -2,6 +2,16 @@ package summary
 
 import "time"
 
+// Status is the normalized evaluation status for an SLIResult.
+type Status string
+
+const (
+	StatusPass Status = "pass"
+	StatusWarn Status = "warn"
+	StatusFail Status = "fail"
+	StatusSkip Status = "skip"
+)
+
 // Summary is the contract output. All measurement methods must converge to this schema.
 type Summary struct {
 	SchemaVersion string    `json:"schemaVersion"`
@@ -37,11 +47,12 @@ type SLIResult struct {
 	Kind        string `json:"kind,omitempty"`
 	Description string `json:"description,omitempty"`
 
-	// v1: a single numeric result. Future: Fields for p50/p99 etc.
+	// v3: a single numeric result. Future: Fields for p50/p99 etc.
 	Value  *float64           `json:"value,omitempty"`
 	Fields map[string]float64 `json:"fields,omitempty"`
 
-	Status string `json:"status"` // "ok" | "warn" | "fail" | "skip"
+	Status Status `json:"status"` // "pass" | "warn" | "fail" | "skip"
+
 	Reason string `json:"reason,omitempty"`
 
 	InputsUsed    []string `json:"inputsUsed,omitempty"`

@@ -6,6 +6,8 @@ import (
 	"io"
 	"strconv"
 	"strings"
+
+	"github.com/yeongki/my-operator/pkg/slo/common/promkey"
 )
 
 // ParseTextToMap parses Prometheus exposition format (text) into a flat map.
@@ -17,10 +19,11 @@ import (
 //
 //	metric_name
 //
-// v1: minimal parser for common cases (counters/gauges).
+// v3: minimal parser for common cases (counters/gauges).
 func ParseTextToMap(r io.Reader) (map[string]float64, error) {
 	out := map[string]float64{}
 	sc := bufio.NewScanner(r)
+
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -31,16 +34,24 @@ func ParseTextToMap(r io.Reader) (map[string]float64, error) {
 		if len(fields) < 2 {
 			continue
 		}
-		key := fields[0]
+		rawKey := fields[0]
+		key, err := promkey.Canonicalize(rawKey)
+		if err != nil {
+			// v3 policy: skip malformed metric lines (best-effort parser)
+			continue
+		}
 		valStr := fields[1]
 		v, err := strconv.ParseFloat(valStr, 64)
 		if err != nil {
 			return nil, fmt.Errorf("parse float: %q: %w", line, err)
 		}
+
 		out[key] = v
 	}
+
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
+
 	return out, nil
 }

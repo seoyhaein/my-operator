@@ -17,17 +17,18 @@ type Logger interface {
 
 type Engine struct {
 	fetcher fetch.MetricsFetcher
-	reg     *spec.Registry
-	writer  summary.Writer
-	logf    func(string, ...any)
+	//Spec  registry.Registry // (옵션) 레지스트리를 쓰는 호출자를 위해 남길 수 있음, 일단 주석처리함.
+	//reg     *spec.Registry
+	writer summary.Writer
+	logf   func(string, ...any)
 }
 
-func New(fetcher fetch.MetricsFetcher, writer summary.Writer, reg *spec.Registry, l Logger) *Engine {
+func New(fetcher fetch.MetricsFetcher, writer summary.Writer, l Logger) *Engine {
 	logf := func(string, ...any) {}
 	if l != nil {
 		logf = l.Logf
 	}
-	return &Engine{fetcher: fetcher, writer: writer, reg: reg, logf: logf}
+	return &Engine{fetcher: fetcher, writer: writer, logf: logf}
 }
 
 func (e *Engine) Execute(ctx context.Context, req ExecuteRequest) (*summary.Summary, error) {
@@ -52,7 +53,7 @@ func (e *Engine) Execute(ctx context.Context, req ExecuteRequest) (*summary.Summ
 	}
 
 	sum := summary.Summary{
-		SchemaVersion: "slo.v1",
+		SchemaVersion: "slo.v3",
 		GeneratedAt:   time.Now(),
 		Config: summary.RunConfig{
 			RunID:      cfg.RunID,
@@ -67,18 +68,19 @@ func (e *Engine) Execute(ctx context.Context, req ExecuteRequest) (*summary.Summ
 		},
 	}
 
-	for _, id := range req.SLIIDs {
-		specItem, ok := e.reg.Get(id)
-		if !ok {
-			sum.Warnings = append(sum.Warnings, fmt.Sprintf("unknown sli id: %s", id))
-			sum.Results = append(sum.Results, summary.SLIResult{
-				ID:     id,
-				Status: "skip",
-				Reason: "unknown sli id",
-			})
-			continue
-		}
-		r := evalSLI(specItem, start.Values, end.Values)
+	for _, s := range req.Specs {
+		// specItem, ok := e.reg.Get(id)
+		// if !ok {
+		// 	sum.Warnings = append(sum.Warnings, fmt.Sprintf("unknown sli id: %s", id))
+		// 	sum.Results = append(sum.Results, summary.SLIResult{
+		// 		ID:     id,
+		// 		Status: "skip",
+		// 		Reason: "unknown sli id",
+		// 	})
+		// 	continue
+		// }
+		// r := evalSLI(specItem, start.Values, end.Values)
+		r := evalSLI(s, start.Values, end.Values)
 		sum.Results = append(sum.Results, r)
 	}
 
@@ -90,7 +92,7 @@ func (e *Engine) Execute(ctx context.Context, req ExecuteRequest) (*summary.Summ
 
 func (e *Engine) emptySummary(cfg RunConfig, warnings []string) *summary.Summary {
 	return &summary.Summary{
-		SchemaVersion: "slo.v1",
+		SchemaVersion: "slo.v3",
 		GeneratedAt:   time.Now(),
 		Config: summary.RunConfig{
 			RunID:         cfg.RunID,
@@ -112,13 +114,13 @@ func evalSLI(s spec.SLISpec, start, end map[string]float64) summary.SLIResult {
 		Unit:        s.Unit,
 		Kind:        s.Kind,
 		Description: s.Description,
-		Status:      "ok",
+		Status:      summary.StatusPass,
 	}
 
 	used := make([]string, 0, len(s.Inputs))
 	missing := make([]string, 0)
 
-	// v1: one-input SLI recommended. If multiple inputs exist, we sum them.
+	// v3: one-input SLI recommended. If multiple inputs exist, we sum them.
 	var valStart, valEnd float64
 	for _, in := range s.Inputs {
 		used = append(used, in.Key)
@@ -135,7 +137,7 @@ func evalSLI(s spec.SLISpec, start, end map[string]float64) summary.SLIResult {
 	res.InputsMissing = missing
 
 	if len(missing) > 0 {
-		res.Status = "skip"
+		res.Status = summary.StatusSkip
 		res.Reason = "missing input metrics"
 		return res
 	}
@@ -146,55 +148,62 @@ func evalSLI(s spec.SLISpec, start, end map[string]float64) summary.SLIResult {
 		value = valStart
 	case spec.ComputeDelta:
 		value = valEnd - valStart
+		if value < 0 {
+			// v3: counter reset suspected (process restart)
+			res.Value = &value
+			res.Status = summary.StatusWarn
+			res.Reason = "delta < 0 (counter reset suspected)"
+			// judge가 있으면 judge 결과로 덮어써버리니까,
+			// 이 경우 judge를 건너뛰는 정책을 택할지 결정해야 함.
+			return res // judge skip
+		}
 	default:
-		res.Status = "skip"
+		res.Status = summary.StatusSkip
 		res.Reason = "unknown compute mode"
 		return res
 	}
 	res.Value = &value
 
-	// Apply judge rules (optional)
 	if s.Judge != nil {
-		status, reason := judge(value, s.Judge.Rules)
-		if status != "" {
-			res.Status = status
-			res.Reason = reason
-		}
+		res.Status, res.Reason = judge(value, s.Judge.Rules)
 	}
 
 	return res
 }
 
-func judge(v float64, rules []spec.Rule) (status, reason string) {
-	// v1: fail dominates warn
+func judge(v float64, rules []spec.Rule) (status summary.Status, reason string) {
+	// v3: fail dominates warn
 	var warn string
 	for _, r := range rules {
-		if compare(v, r.Op, r.Target) {
-			if r.Level == "fail" {
-				return "fail", fmt.Sprintf("rule fail: value %s %v", r.Op, r.Target)
-			}
-			if r.Level == "warn" {
-				warn = fmt.Sprintf("rule warn: value %s %v", r.Op, r.Target)
-			}
+		if !compare(v, r.Op, r.Target) {
+			continue
+		}
+		switch r.Level {
+		case spec.LevelFail:
+			return summary.StatusFail, fmt.Sprintf("rule fail: value %s %v", r.Op, r.Target)
+		case spec.LevelWarn:
+			warn = fmt.Sprintf("rule warn: value %s %v", r.Op, r.Target)
+		default:
+			// TODO(v4): unknown level -> warn/skip?
 		}
 	}
 	if warn != "" {
-		return "warn", warn
+		return summary.StatusWarn, warn
 	}
-	return "", ""
+	return summary.StatusPass, ""
 }
 
-func compare(v float64, op string, target float64) bool {
+func compare(v float64, op spec.Op, target float64) bool {
 	switch op {
-	case "<=":
+	case spec.OpLE:
 		return v <= target
-	case ">=":
+	case spec.OpGE:
 		return v >= target
-	case "<":
+	case spec.OpLT:
 		return v < target
-	case ">":
+	case spec.OpGT:
 		return v > target
-	case "==":
+	case spec.OpEQ:
 		return v == target
 	default:
 		return false
