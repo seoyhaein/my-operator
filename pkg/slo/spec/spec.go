@@ -23,6 +23,7 @@ func PromMetric(name string, labels Labels) MetricRef {
 	return MetricRef{Key: promkey.Format(name, map[string]string(labels))}
 }
 
+// TODO spec_v4 참고 향후 통합될 예정임.
 type ComputeMode string
 
 const (

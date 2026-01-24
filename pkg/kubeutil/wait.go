@@ -10,6 +10,11 @@ import (
 	"github.com/yeongki/my-operator/pkg/slo"
 )
 
+// TODO(refactor): Extract the common polling loop logic into a generic 'Poll' function.
+// Currently, similar retry loops are duplicated here and in pkg/kubeutil/token.go.
+// Implementing a shared 'Poll(ctx, interval, condition)' utility will standardize
+// async waiting patterns and reduce code duplication.
+
 // WaitOptions controls polling behavior.
 type WaitOptions struct {
 	Timeout  time.Duration // overall timeout (0 => default)
@@ -29,13 +34,7 @@ func (o WaitOptions) withDefaults() WaitOptions {
 
 // WaitControllerManagerReady waits until controller-manager pod is Ready.
 // Assumes label selector "control-plane=controller-manager" (kubebuilder default).
-func WaitControllerManagerReady(
-	ctx context.Context,
-	logger slo.Logger,
-	r CmdRunner,
-	ns string,
-	opts WaitOptions,
-) error {
+func WaitControllerManagerReady(ctx context.Context, logger slo.Logger, r CmdRunner, ns string, opts WaitOptions) error {
 	return WaitPodContainerReadyByLabel(
 		ctx,
 		logger,
@@ -50,16 +49,7 @@ func WaitControllerManagerReady(
 
 // WaitPodContainerReadyByLabel waits until the first matching pod's Nth container is ready.
 // podIndex/containerIndex default to 0 in most kubebuilder setups.
-func WaitPodContainerReadyByLabel(
-	ctx context.Context,
-	logger slo.Logger,
-	r CmdRunner,
-	ns string,
-	labelSelector string,
-	podIndex int,
-	containerIndex int,
-	opts WaitOptions,
-) error {
+func WaitPodContainerReadyByLabel(ctx context.Context, logger slo.Logger, r CmdRunner, ns string, labelSelector string, podIndex int, containerIndex int, opts WaitOptions) error {
 	logger = slo.NewLogger(logger)
 	if r == nil {
 		r = DefaultRunner{}
@@ -122,14 +112,7 @@ func WaitPodContainerReadyByLabel(
 }
 
 // WaitServiceHasEndpoints waits until the Endpoints object has at least one address.
-func WaitServiceHasEndpoints(
-	ctx context.Context,
-	logger slo.Logger,
-	r CmdRunner,
-	ns string,
-	svc string,
-	opts WaitOptions,
-) error {
+func WaitServiceHasEndpoints(ctx context.Context, logger slo.Logger, r CmdRunner, ns string, svc string, opts WaitOptions) error {
 	logger = slo.NewLogger(logger)
 	if r == nil {
 		r = DefaultRunner{}
