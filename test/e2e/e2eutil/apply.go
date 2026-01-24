@@ -27,14 +27,7 @@ type Runner interface {
 // - relPath: template path relative to rootDir (e.g., "test/e2e/manifests/namespace.tmpl.yaml.gotmpl")
 // - data: template data (struct/map)
 // Returns kubectl stdout for debugging.
-func ApplyTemplate(
-	ctx context.Context,
-	rootDir string,
-	relPath string,
-	data any,
-	runner Runner,
-	logger Logger,
-) (string, error) {
+func ApplyTemplate(ctx context.Context, rootDir string, relPath string, data any, runner Runner, logger Logger) (string, error) {
 	manifest, err := devutil.RenderTemplateFileString(rootDir, relPath, data)
 	if err != nil {
 		return "", fmt.Errorf("render template %q: %w", relPath, err)

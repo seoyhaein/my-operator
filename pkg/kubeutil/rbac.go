@@ -16,15 +16,7 @@ import (
 // TODO(security): Reduce YAML-injection risk by building a typed struct and marshaling
 // (e.g. struct -> YAML/JSON), instead of fmt.Sprintf string templating.
 // Even if we keep `kubectl apply`, struct->marshal makes input handling safer.
-func ApplyClusterRoleBinding(
-	ctx context.Context,
-	logger slo.Logger,
-	r CmdRunner,
-	name string,
-	clusterRole string,
-	ns string,
-	sa string,
-) error {
+func ApplyClusterRoleBinding(ctx context.Context, logger slo.Logger, r CmdRunner, name string, clusterRole string, ns string, sa string) error {
 	logger = slo.NewLogger(logger)
 	if r == nil {
 		r = DefaultRunner{}

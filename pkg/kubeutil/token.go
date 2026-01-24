@@ -23,10 +23,23 @@ const tokenRequestBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"Token
 // stop using a raw JSON string and marshal a struct instead.
 // Rationale: easier to extend safely (optional fields), avoids fragile string edits,
 // and produces correct JSON consistently.
+// {
+//   "apiVersion": "authentication.k8s.io/v1",
+//   "kind": "TokenRequest",
+//   "spec": {
+//     "expirationSeconds": 3600,
+//     "audiences": ["api"]
+//   }
+// }
 
 // ServiceAccountToken requests a token for the given ServiceAccount.
 // - Retries until ctx is done.
 // - logger may be nil (no-op).
+// TODO(refactor): Refactor manual retry loop to use a shared 'Poll' utility.
+// Currently, this function implements a custom loop/ticker to handle eventual consistency.
+// We should standardize this pattern by implementing a helper (e.g., PollImmediate in pkg/kubeutil/wait.go)
+// to improve stability and code reuse across the project.
+// context 가 잘 넘어간다, func(ctx context.Context) (string, error => 이것과 동일한 형태이다, Closure 가 선언될 당시의 변수를 캡쳐해서 사용하기 때문에 가능하다.
 func ServiceAccountToken(ctx context.Context, logger slo.Logger, r CmdRunner, ns, sa string) (string, error) {
 	logger = slo.NewLogger(logger)
 	if r == nil {
@@ -47,8 +60,8 @@ func ServiceAccountToken(ctx context.Context, logger slo.Logger, r CmdRunner, ns
 			"-f", "-",
 		)
 		cmd.Stdin = strings.NewReader(tokenRequestBody)
-
-		stdout, err := r.Run(ctx, logger, cmd) // ✅ ctx 반영
+		// ctx 반영, Closure 캡처
+		stdout, err := r.Run(ctx, logger, cmd)
 		if err != nil {
 			return "", fmt.Errorf("token request failed (ns=%s sa=%s): %w", ns, sa, err)
 		}
